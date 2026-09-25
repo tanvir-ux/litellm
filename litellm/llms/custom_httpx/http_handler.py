@@ -509,14 +509,31 @@ def _safe_read_response(response: httpx.Response, timeout: float | None = None) 
         return b""
 
 
+def _decode_error_body(body: str | bytes | None) -> str:
+    """Normalize a streamed HTTP error body to ``str``.
+
+    ``response.read()`` / ``aread()`` return ``bytes``. Passing those through as
+    ``MaskedHTTPStatusError.message`` makes ``str(message)`` look like
+    ``b'{...}'``, which breaks provider exception mapping (e.g. Gemini context
+    window detection on the chat streaming path — see #43014).
+    """
+    if body is None:
+        return ""
+    if isinstance(body, bytes):
+        return body.decode("utf-8", errors="replace")
+    return body
+
+
 def _raise_masked_sync_error(e: httpx.HTTPStatusError, stream: bool) -> NoReturn:
     """Raise a MaskedHTTPStatusError for sync HTTP handlers."""
     if stream:
         try:
             _body: Final = mask_sensitive_info(
-                _safe_read_response(
-                    e.response,
-                    timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
+                _decode_error_body(
+                    _safe_read_response(
+                        e.response,
+                        timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
+                    )
                 )
             )
             raise MaskedHTTPStatusError(e, message=_body, text=_body) from None
@@ -534,9 +551,11 @@ async def _raise_masked_async_error(e: httpx.HTTPStatusError, stream: bool) -> N
     if stream:
         try:
             _body: Final = mask_sensitive_info(
-                await _safe_aread_response(
-                    e.response,
-                    timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
+                _decode_error_body(
+                    await _safe_aread_response(
+                        e.response,
+                        timeout=_STREAMING_ERROR_BODY_READ_TIMEOUT_SECONDS,
+                    )
                 )
             )
             raise MaskedHTTPStatusError(e, message=_body, text=_body) from None

@@ -2560,6 +2560,34 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         return default_headers
 
 
+
+def _http_status_error_message(error: httpx.HTTPStatusError) -> str:
+    """Best-effort UTF-8 body from a streaming HTTPStatusError.
+
+    LiteLLM's HTTP handler raises ``MaskedHTTPStatusError`` with ``message`` /
+    ``text`` already set to the response body. Re-reading the response after that
+    usually returns empty bytes, which used to become ``str(b'') == "b''"`` and
+    skipped context-window exception mapping on Gemini chat streams (#43014).
+    """
+    for attr in ("text", "message"):
+        value = getattr(error, attr, None)
+        if value is None:
+            continue
+        if isinstance(value, bytes):
+            decoded = value.decode("utf-8", errors="replace")
+        else:
+            decoded = str(value)
+        if decoded:
+            return decoded
+    try:
+        raw = error.response.read() if hasattr(error.response, "read") else b""
+    except Exception:
+        raw = b""
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", errors="replace")
+    return str(raw)
+
+
 async def make_call(
     client: AsyncHTTPHandler | None,  # module-level client
     gemini_client: AsyncHTTPHandler | None,  # if passed by user
@@ -2581,7 +2609,9 @@ async def make_call(
         response: Final = await client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
         response.raise_for_status()
     except httpx.HTTPStatusError as e:
-        exception_string: Final = str(await e.response.aread())
+        # Prefer the already-decoded body from MaskedHTTPStatusError. The stream
+        # body is consumed when the HTTP handler raises, so aread() is often empty.
+        exception_string: Final = _http_status_error_message(e)
         raise VertexAIError(
             status_code=e.response.status_code,
             message=VertexGeminiConfig().translate_exception_str(exception_string),
@@ -2627,12 +2657,23 @@ def make_sync_call(
     if client is None:
         client = HTTPHandler()  # Create a new client if none provided
 
-    response: Final = client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+    try:
+        response: Final = client.post(api_base, headers=headers, data=data, stream=True, logging_obj=logging_obj)
+    except httpx.HTTPStatusError as e:
+        exception_string: Final = _http_status_error_message(e)
+        raise VertexAIError(
+            status_code=e.response.status_code,
+            message=VertexGeminiConfig().translate_exception_str(exception_string),
+            headers=e.response.headers,
+        )
 
     if response.status_code != 200 and response.status_code != 201:
+        body = response.read()
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
         raise VertexAIError(
             status_code=response.status_code,
-            message=str(response.read()),
+            message=str(body),
             headers=response.headers,
         )
 

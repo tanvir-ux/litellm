@@ -219,7 +219,10 @@ class TestRaiseMaskedError:
 
         err = exc_info.value
         assert "LEAKED_KEY" not in str(err.request.url)
-        assert err.message is not None
+        assert isinstance(err.message, str)
+        assert err.message == "stream body"
+        assert isinstance(err.text, str)
+        assert err.text == "stream body"
 
     def test_sync_breaks_exception_chain(self):
         orig = _make_httpx_status_error()
@@ -251,7 +254,10 @@ class TestRaiseMaskedError:
 
         err = exc_info.value
         assert "LEAKED_KEY" not in str(err.request.url)
-        assert err.message is not None
+        assert isinstance(err.message, str)
+        assert err.message == "async stream"
+        assert isinstance(err.text, str)
+        assert err.text == "async stream"
 
     @pytest.mark.asyncio
     async def test_async_breaks_chain(self):
