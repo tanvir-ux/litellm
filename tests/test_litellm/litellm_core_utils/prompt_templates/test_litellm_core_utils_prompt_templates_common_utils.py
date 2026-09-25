@@ -1492,6 +1492,99 @@ class TestFlattenTopLevelSchemaCombinators:
         assert schema == snapshot
 
 
+class TestSanitizeInputSchemaForAnthropic:
+    """Regression for #43157: root anyOf/$ref must not become empty properties."""
+
+    def _pydantic_union_schema(self):
+        from typing import Literal, Union
+
+        from pydantic import BaseModel, TypeAdapter
+
+        class A(BaseModel):
+            kind: Literal["a"]
+            a: str
+
+        class B(BaseModel):
+            kind: Literal["b"]
+            b: int
+
+        return TypeAdapter(Union[A, B]).json_schema()
+
+    def test_pydantic_union_keeps_merged_properties(self):
+        from litellm.litellm_core_utils.prompt_templates.common_utils import (
+            sanitize_input_schema_for_anthropic,
+        )
+
+        schema = self._pydantic_union_schema()
+        assert "anyOf" in schema
+        assert "properties" not in schema
+
+        result = sanitize_input_schema_for_anthropic(schema)
+
+        assert "anyOf" not in result
+        assert result["type"] == "object"
+        assert set(result["properties"]) == {"kind", "a", "b"}
+        assert result["required"] == ["kind"]
+        assert "$defs" in result
+
+    def test_root_local_ref_inlines_target_properties(self):
+        from litellm.litellm_core_utils.prompt_templates.common_utils import (
+            sanitize_input_schema_for_anthropic,
+        )
+
+        schema = {
+            "$defs": {
+                "Payload": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}, "n": {"type": "integer"}},
+                    "required": ["id", "n"],
+                }
+            },
+            "$ref": "#/$defs/Payload",
+        }
+
+        result = sanitize_input_schema_for_anthropic(schema)
+
+        assert "$ref" not in result
+        assert result["type"] == "object"
+        assert set(result["properties"]) == {"id", "n"}
+        assert result["required"] == ["id", "n"]
+        assert "$defs" in result
+
+    def test_plain_object_schema_unchanged(self):
+        from litellm.litellm_core_utils.prompt_templates.common_utils import (
+            sanitize_input_schema_for_anthropic,
+        )
+
+        schema = {
+            "type": "object",
+            "properties": {"q": {"type": "string"}},
+            "required": ["q"],
+        }
+
+        result = sanitize_input_schema_for_anthropic(schema)
+
+        assert dict(result) == schema
+
+    def test_anthropic_map_tools_keeps_union_properties(self):
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+        schema = self._pydantic_union_schema()
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "do",
+                "description": "union tool",
+                "parameters": schema,
+            },
+        }
+
+        mapped, _ = AnthropicConfig()._map_tools([tool])
+
+        assert set(mapped[0]["input_schema"]["properties"]) == {"kind", "a", "b"}
+        assert mapped[0]["input_schema"]["required"] == ["kind"]
+
+
 class TestToolWithSanitizedParameters:
     def _anyof_tool(self):
         return {

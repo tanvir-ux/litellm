@@ -1140,16 +1140,25 @@ def sanitize_input_schema_for_anthropic(input_schema: dict) -> "AnthropicInputSc
     (``AnthropicConfig._map_tool_helper``) and Anthropic Messages MCP paths run
     a schema through here so an external MCP schema cannot succeed on one route
     and 400 on the other.
+
+    Root ``anyOf`` / ``oneOf`` / ``allOf`` and root local ``$ref`` schemas (the
+    shape Pydantic emits for ``Union[...]`` tools) are rewritten into an object
+    schema before the allowlist runs. Without that rewrite the allowlist drops
+    the combinator / ``$ref`` and leaves a silent empty ``properties: {}``.
     """
     from litellm.types.llms.anthropic import AnthropicInputSchema
 
     normalized = dict(input_schema) if input_schema else {}
+    normalized = unpack_legacy_defs(normalized, copy=True)
+    # Inline a root ``$ref`` and flatten top-level combinators *before* inventing
+    # empty ``properties``, so a dropped union cannot become a blank object.
+    normalized = dict(_expand_root_local_ref(normalized))
+    normalized = dict(flatten_top_level_schema_combinators(normalized))
+
     if normalized.get("type") != "object":
         normalized["type"] = "object"
     if "properties" not in normalized:
         normalized["properties"] = {}
-
-    normalized = unpack_legacy_defs(normalized, copy=True)
 
     allowed_keys: Final = set(AnthropicInputSchema.__annotations__.keys())
     filtered: Final = {key: value for key, value in normalized.items() if key in allowed_keys}
@@ -1288,6 +1297,27 @@ def _flatten_schema_against_root(
         "properties": merged_properties,
         **required_update,
     }
+
+
+def _expand_root_local_ref(schema: Mapping[str, object]) -> Mapping[str, object]:
+    """Inline a top-level local ``$ref`` into the referenced object schema.
+
+    Keeps the root ``$defs`` / ``definitions`` containers so nested refs inside
+    the target (and later Anthropic schema resolution) still work. External or
+    unresolvable refs are left untouched.
+    """
+    ref: Final = schema.get("$ref")
+    if not isinstance(ref, str):
+        return schema
+    expanded: Final = _mergeable_branch(schema, {"$ref": ref}, frozenset(), 0, {})
+    if expanded is None:
+        return schema
+    out: Final = {  # mutable-ok: tool parameters are JSON dicts
+        **dict(expanded),
+        **{key: schema[key] for key in ("$defs", "definitions") if key in schema},
+    }
+    out.pop("$ref", None)
+    return out
 
 
 def flatten_top_level_schema_combinators(schema: Mapping[str, object]) -> Mapping[str, object]:
